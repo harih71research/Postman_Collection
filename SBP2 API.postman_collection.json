@@ -1,0 +1,452 @@
+{
+  "info": {
+    "_postman_id": "4634784d-d0e9-4a0c-8904-807afc75c385",
+    "name": "SBP2 API",
+    "description": "**Okta (collection Pre-request Script):** If `access_token` is missing or past `token_expiry_time` minus `okta_token_skew_sec` (default 300s), tries `refresh_token` first; on failure runs full PKCE + `/authn` + security-question MFA + `/authorize` + token exchange. Set `okta_username`, `okta_password`, `okta_security_answer`, `subscription_key`. Set `okta_auto_token` to `false` to skip and use a manual Bearer token. **Redirects:** Collection `protocolProfileBehavior.followRedirects` is `false` (Postman runner + Newman). **Newman:** `npm run newman:foundation` (includes `--ignore-redirects`). **/authorize** in pre-request also passes `followRedirects: false` on `pm.sendRequest`. **Logs:** `console_log` = `true`.\n\nAdd new HTTP requests under **SBP2 API**.\n\nPostman cloud UID `36942390-6e93e4af-21f8-40bf-a34d-57fcb934b374` — workspace **SBP2 — Newman & CI** (`b21f6db2-706a-46e7-bd90-294366d2a582`).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "36942390"
+  },
+  "item": [
+    {
+      "name": "Health Check",
+      "item": [
+        {
+          "name": "Health Check",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const code = pm.response.code;",
+                  "pm.test('Health — status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Health — response is JSON', () => pm.response.to.be.json);",
+                  "const j = pm.response.json();",
+                  "pm.test('Health — body has status', () => pm.expect(j).to.have.property('status'));",
+                  "pm.test('Health — status is ok', () => pm.expect(String(j.status).toLowerCase()).to.eql('ok'));",
+                  "pm.test('Health — has timestamp', () => pm.expect(j).to.have.property('timestamp'));",
+                  "pm.test('Health — has version', () => pm.expect(j).to.have.property('version'));",
+                  "pm.test('Health — response time under 10s', () => pm.expect(pm.response.responseTime).to.be.below(10000));"
+                ],
+                "type": "text/javascript",
+                "packages": {},
+                "requests": {}
+              }
+            },
+            {
+              "listen": "prerequest",
+              "script": {
+                "packages": {},
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              },
+              {
+                "key": "Subscription-Key",
+                "value": "{{subscription_key}}"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/health",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "health"
+              ]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "requests": {},
+        "exec": [
+          "// SBP2: Okta token in collection pre-request (refresh or full PKCE). send() defaults followRedirects:false unless okta_pm_follow_redirects=true. okta_auto_token=false to skip.",
+          "return (async function oktaAutoToken() {",
+          "    const cv = (k) => pm.collectionVariables.get(k);",
+          "    const setv = (k, v) => pm.collectionVariables.set(k, v);",
+          "    const log = (m) => {",
+          "        if (String(cv('console_log')).toLowerCase() === 'true') console.log('[Okta pre]', m);",
+          "    };",
+          "",
+          "    if (String(cv('okta_auto_token')).toLowerCase() === 'false') {",
+          "        log('skip: okta_auto_token=false');",
+          "        return;",
+          "    }",
+          "",
+          "    const skew = parseInt(cv('okta_token_skew_sec') || '300', 10) || 300;",
+          "    const now = Math.floor(Date.now() / 1000);",
+          "    const expStr = cv('token_expiry_time');",
+          "    const exp = expStr ? parseInt(expStr, 10) : 0;",
+          "    const access = cv('access_token');",
+          "    const refresh = cv('refresh_token');",
+          "",
+          "    if (access && exp && now < exp - skew) {",
+          "        log('access token still valid');",
+          "        return;",
+          "    }",
+          "",
+          "    log('need token — refresh or full login');",
+          "",
+          "    function send(req) {",
+          "        const allowFollow = String(cv('okta_pm_follow_redirects') || '').toLowerCase() === 'true';",
+          "        const merged = typeof req === 'string' ? { url: req } : Object.assign({}, req);",
+          "        if (!allowFollow) {",
+          "            merged.followRedirects = false;",
+          "        }",
+          "        return new Promise((resolve, reject) => {",
+          "            pm.sendRequest(merged, (err, res) => {",
+          "                if (err) reject(err);",
+          "                else resolve(res);",
+          "            });",
+          "        });",
+          "    }",
+          "",
+          "    function oauthCodeFromUrlOrLoc(str) {",
+          "        if (!str) return null;",
+          "        const m = String(str).match(/[?&]code=([^&]+)/);",
+          "        return m ? decodeURIComponent(m[1]) : null;",
+          "    }",
+          "",
+          "    /** Reads OAuth ?code= from Location (302) or from final URL if client still followed redirects. */",
+          "    function pickAuthCodeFromAuthorizeResponse(authzRes) {",
+          "        const h = authzRes.headers;",
+          "        const loc = (h && h.get && (h.get('Location') || h.get('location'))) || '';",
+          "        let code = oauthCodeFromUrlOrLoc(loc);",
+          "        if (code) return { code, hint: loc };",
+          "        if (typeof authzRes.url === 'string') {",
+          "            code = oauthCodeFromUrlOrLoc(authzRes.url);",
+          "            if (code) return { code, hint: authzRes.url };",
+          "        }",
+          "        try {",
+          "            const ru = authzRes.request && authzRes.request.url;",
+          "            const urlStr = ru && (typeof ru === 'string' ? ru : ru.toString && ru.toString());",
+          "            if (urlStr) {",
+          "                code = oauthCodeFromUrlOrLoc(urlStr);",
+          "                if (code) return { code, hint: urlStr };",
+          "            }",
+          "        } catch (e) {",
+          "            /* ignore */",
+          "        }",
+          "        return { code: null, hint: loc };",
+          "    }",
+          "",
+          "    function b64url(w) {",
+          "        const CJ = require('crypto-js');",
+          "        return CJ.enc.Base64.stringify(w).replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/, '');",
+          "    }",
+          "",
+          "    function ensurePkce() {",
+          "        const CJ = require('crypto-js');",
+          "        const verifier = b64url(CJ.lib.WordArray.random(32));",
+          "        const challenge = b64url(CJ.SHA256(verifier));",
+          "        setv('code_verifier', verifier);",
+          "        setv('code_challenge', challenge);",
+          "    }",
+          "",
+          "    function applyTokenResponse(j) {",
+          "        if (!j || !j.access_token) return false;",
+          "        setv('access_token', j.access_token);",
+          "        if (j.refresh_token) setv('refresh_token', j.refresh_token);",
+          "        const t = Math.floor(Date.now() / 1000) + (j.expires_in || 3600) - skew;",
+          "        setv('token_expiry_time', String(t));",
+          "        log('tokens updated, exp epoch ~' + t);",
+          "        return true;",
+          "    }",
+          "",
+          "    async function tryRefresh() {",
+          "        if (!refresh) return false;",
+          "        const domain = (cv('okta_domain') || '').replace(/\\/$/, '');",
+          "        const url = domain + '/oauth2/default/v1/token';",
+          "        const body = [",
+          "            'grant_type=refresh_token',",
+          "            'client_id=' + encodeURIComponent(cv('token_client_id')),",
+          "            'refresh_token=' + encodeURIComponent(refresh),",
+          "        ].join('&');",
+          "        try {",
+          "            const res = await send({",
+          "                url,",
+          "                method: 'POST',",
+          "                header: {",
+          "                    'Content-Type': 'application/x-www-form-urlencoded',",
+          "                    Accept: 'application/json',",
+          "                },",
+          "                body: { mode: 'raw', raw: body },",
+          "            });",
+          "            if (res.code !== 200) {",
+          "                log('refresh failed HTTP ' + res.code + ' ' + res.text().slice(0, 200));",
+          "                setv('access_token', '');",
+          "                setv('token_expiry_time', '');",
+          "                return false;",
+          "            }",
+          "            const j = res.json();",
+          "            if (j.error) {",
+          "                log('refresh error: ' + j.error + ' ' + (j.error_description || ''));",
+          "                setv('access_token', '');",
+          "                setv('token_expiry_time', '');",
+          "                return false;",
+          "            }",
+          "            return applyTokenResponse(j);",
+          "        } catch (e) {",
+          "            log('refresh exception: ' + e);",
+          "            return false;",
+          "        }",
+          "    }",
+          "",
+          "    async function fullLogin() {",
+          "        const user = cv('okta_username');",
+          "        const pass = cv('okta_password');",
+          "        if (!user || !pass) {",
+          "            throw new Error('Set okta_username and okta_password (collection or environment).');",
+          "        }",
+          "",
+          "        const domain = (cv('okta_domain') || '').replace(/\\/$/, '');",
+          "        ensurePkce();",
+          "",
+          "        const authnRes = await send({",
+          "            url: domain + '/api/v1/authn',",
+          "            method: 'POST',",
+          "            header: {",
+          "                'Content-Type': 'application/json',",
+          "                Accept: 'application/json',",
+          "            },",
+          "            body: {",
+          "                mode: 'raw',",
+          "                raw: JSON.stringify({",
+          "                    username: user,",
+          "                    password: pass,",
+          "                    options: {",
+          "                        multiOptionalFactorEnroll: true,",
+          "                        warnBeforePasswordExpired: true,",
+          "                    },",
+          "                }),",
+          "            },",
+          "        });",
+          "        if (authnRes.code !== 200) {",
+          "            throw new Error('Okta authn failed HTTP ' + authnRes.code + ' ' + authnRes.text().slice(0, 300));",
+          "        }",
+          "        let authn = authnRes.json();",
+          "        let session = authn.sessionToken;",
+          "",
+          "        if (authn.status === 'MFA_REQUIRED') {",
+          "            setv('state_token', authn.stateToken || '');",
+          "            const factors = (authn._embedded && authn._embedded.factors) || [];",
+          "            const f = factors[0] || {};",
+          "            const href = f._links && f._links.verify && f._links.verify.href;",
+          "            if (!href) throw new Error('MFA_REQUIRED but no verify href — add MFA handling for this factor.');",
+          "            const answer = cv('okta_security_answer');",
+          "            if (!answer) throw new Error('MFA required — set okta_security_answer for security question.');",
+          "            const mfaRes = await send({",
+          "                url: href,",
+          "                method: 'POST',",
+          "                header: {",
+          "                    'Content-Type': 'application/json',",
+          "                    Accept: 'application/json',",
+          "                },",
+          "                body: {",
+          "                    mode: 'raw',",
+          "                    raw: JSON.stringify({",
+          "                        stateToken: authn.stateToken,",
+          "                        answer: answer,",
+          "                    }),",
+          "                },",
+          "            });",
+          "            if (mfaRes.code !== 200) {",
+          "                throw new Error('MFA verify failed HTTP ' + mfaRes.code + ' ' + mfaRes.text().slice(0, 300));",
+          "            }",
+          "            const mj = mfaRes.json();",
+          "            session = mj.sessionToken;",
+          "            if (!session) throw new Error('No sessionToken after MFA.');",
+          "        } else if (authn.status !== 'SUCCESS' || !session) {",
+          "            throw new Error('Unexpected authn status: ' + (authn.status || 'unknown'));",
+          "        }",
+          "",
+          "        const q = [",
+          "            'client_id=' + encodeURIComponent(cv('token_client_id')),",
+          "            'response_type=code',",
+          "            'scope=' + encodeURIComponent('openid profile email offline_access'),",
+          "            'redirect_uri=' + encodeURIComponent(cv('sbp_redirect_uri')),",
+          "            'state=' + encodeURIComponent('pre_' + Date.now()),",
+          "            'nonce=' + encodeURIComponent('n_' + Date.now()),",
+          "            'code_challenge=' + encodeURIComponent(cv('code_challenge')),",
+          "            'code_challenge_method=S256',",
+          "            'sessionToken=' + encodeURIComponent(session),",
+          "        ].join('&');",
+          "        const authorizeUrl = domain + '/oauth2/default/v1/authorize?' + q;",
+          "",
+          "        const authzRes = await send({",
+          "            url: authorizeUrl,",
+          "            method: 'GET',",
+          "            header: { Accept: 'text/html,application/json' },",
+          "        });",
+          "        const picked = pickAuthCodeFromAuthorizeResponse(authzRes);",
+          "        if (!picked.code) {",
+          "            const hint = picked.hint || '';",
+          "            const errM = hint.match(/[?&]error=([^&]+)/);",
+          "            const err = errM ? decodeURIComponent(errM[1]) : '';",
+          "            throw new Error(",
+          "                'No OAuth code in /authorize response. Keep okta_pm_follow_redirects=false (default) so redirects are not followed. ' +",
+          "                    (err || 'HTTP ' + authzRes.code + ' Location/finalUrl=' + hint.slice(0, 200))",
+          "            );",
+          "        }",
+          "        const code = picked.code;",
+          "",
+          "        const tokenBody = [",
+          "            'grant_type=authorization_code',",
+          "            'code=' + encodeURIComponent(code),",
+          "            'redirect_uri=' + encodeURIComponent(cv('sbp_redirect_uri')),",
+          "            'client_id=' + encodeURIComponent(cv('token_client_id')),",
+          "            'code_verifier=' + encodeURIComponent(cv('code_verifier')),",
+          "        ].join('&');",
+          "",
+          "        const tokRes = await send({",
+          "            url: domain + '/oauth2/default/v1/token',",
+          "            method: 'POST',",
+          "            header: {",
+          "                'Content-Type': 'application/x-www-form-urlencoded',",
+          "                Accept: 'application/json',",
+          "            },",
+          "            body: { mode: 'raw', raw: tokenBody },",
+          "        });",
+          "        if (tokRes.code !== 200) {",
+          "            throw new Error('Token exchange failed HTTP ' + tokRes.code + ' ' + tokRes.text().slice(0, 400));",
+          "        }",
+          "        const tj = tokRes.json();",
+          "        if (tj.error) throw new Error(tj.error + ': ' + (tj.error_description || ''));",
+          "        if (!applyTokenResponse(tj)) throw new Error('No access_token in token response.');",
+          "    }",
+          "",
+          "    if (await tryRefresh()) return;",
+          "",
+          "    await fullLogin();",
+          "})();",
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "okta_domain",
+      "value": "https://applogin-uat.jll.com"
+    },
+    {
+      "key": "token_client_id",
+      "value": "0oa2gd82nlafxy3Na0h8"
+    },
+    {
+      "key": "sbp_redirect_uri",
+      "value": "https://dev1-sbp.jll.com/login/callback"
+    },
+    {
+      "key": "okta_username",
+      "value": ""
+    },
+    {
+      "key": "okta_password",
+      "value": ""
+    },
+    {
+      "key": "okta_security_answer",
+      "value": ""
+    },
+    {
+      "key": "base_url",
+      "value": "https://api-ue1-am-apim-nonprod.jll.com/sbp/v1"
+    },
+    {
+      "key": "subscription_key",
+      "value": ""
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "refresh_token",
+      "value": ""
+    },
+    {
+      "key": "token_expiry_time",
+      "value": ""
+    },
+    {
+      "key": "code_verifier",
+      "value": ""
+    },
+    {
+      "key": "code_challenge",
+      "value": ""
+    },
+    {
+      "key": "state_token",
+      "value": ""
+    },
+    {
+      "key": "session_token",
+      "value": ""
+    },
+    {
+      "key": "mfa_verify_url",
+      "value": ""
+    },
+    {
+      "key": "authorize_url",
+      "value": ""
+    },
+    {
+      "key": "authorization_code",
+      "value": ""
+    },
+    {
+      "key": "console_log",
+      "value": "false"
+    },
+    {
+      "key": "skip_role_check",
+      "value": "true"
+    },
+    {
+      "key": "okta_auto_token",
+      "value": "true"
+    },
+    {
+      "key": "okta_token_skew_sec",
+      "value": "300"
+    },
+    {
+      "key": "okta_pm_follow_redirects",
+      "value": ""
+    }
+  ]
+}
